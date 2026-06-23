@@ -1,0 +1,11 @@
+[project]
+name = "beck"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.11.0",
+    "openpyxl>=3.1.5",
+    "polars>=1.41.2",
+]
