@@ -1,10 +1,41 @@
+#%%
+
 import polars as pl
 import json
 import pathlib
 
 # ── 1. Load & clean ──────────────────────────────────────────────────────────
 
+
 df = pl.read_excel("/Users/konradkrahl/Library/CloudStorage/OneDrive-Highberg/Desktop/Beck/Data/Module_Clicks.xlsx")
+df = df.filter(pl.col("2025 \nKlicks Gesamtjahr").cast(pl.Float64, strict=False) > 0)
+df_revenue = pl.read_excel("/Users/konradkrahl/Library/CloudStorage/OneDrive-Highberg/Desktop/Beck/Data/Revenue.xlsx", sheet_name="beck-online Module")
+
+
+
+#%%
+
+# Add lowercase join keys without modifying the originals
+df = df.with_columns(pl.col("Module").str.to_lowercase().alias("_join_key"))
+df_revenue = df_revenue.with_columns(pl.col("Bezeichnung").str.to_lowercase().alias("_join_key"))
+
+# Merge on the lowercase key
+merged = (
+    df.select(["Publikation", "Module", "2025 \nKlicks Gesamtjahr"])
+      .with_columns(pl.col("Module").str.to_lowercase().alias("_join_key"))
+      .join(
+          df_revenue.select(["Bezeichnung", "2025"])
+                    .with_columns(pl.col("Bezeichnung").str.to_lowercase().alias("_join_key")),
+          on="_join_key",
+          how="left"
+      )
+      .drop("_join_key")
+)
+
+merged.write_excel("/Users/konradkrahl/Library/CloudStorage/OneDrive-Highberg/Desktop/Beck/Data/Click_Revenue.xlsx")
+
+#%%
+
 
 year_cols = [
     "2019 \nKlicks Gesamtjahr",
@@ -75,11 +106,33 @@ ranks = {
     for pub, mods in pub_map.items()
 }
 
-# ── 4. Serialise to JSON ─────────────────────────────────────────────────────
+# ── 4. Build revenue lookup and module total clicks ──────────────────────────
 
-data_json = json.dumps({"pub_map": pub_map, "ranks": ranks}, ensure_ascii=False)
+revenue_map: dict[str, dict] = {}
+for row in merged.iter_rows(named=True):
+    mod = row.get("Module")
+    rev = row.get("2025")
+    if not mod:
+        continue
+    if mod not in revenue_map:
+        revenue_map[mod] = {"revenue": rev}
 
-# ── 5. HTML dashboard ────────────────────────────────────────────────────────
+module_total_clicks: dict[str, float] = {}
+for pub, mods in pub_map.items():
+    for mod, arr in mods.items():
+        total = sum(v for v in arr if v is not None)
+        module_total_clicks[mod] = module_total_clicks.get(mod, 0) + total
+
+# ── 5. Serialise to JSON ─────────────────────────────────────────────────────
+
+data_json = json.dumps({
+    "pub_map": pub_map,
+    "ranks": ranks,
+    "revenue_map": revenue_map,
+    "module_total_clicks": module_total_clicks
+}, ensure_ascii=False)
+
+# ── 6. HTML dashboard ────────────────────────────────────────────────────────
 
 HTML = f"""<!DOCTYPE html>
 <html lang="de">
@@ -167,6 +220,8 @@ HTML = f"""<!DOCTYPE html>
 const RAW = {data_json};
 const pub_map = RAW.pub_map;
 const ranks   = RAW.ranks;
+const REV     = RAW.revenue_map;
+const MOD_TOT = RAW.module_total_clicks;
 const YEARS   = ["2019","2020","2021","2022","2023","2024","2025"];
 
 const COLORS = [
@@ -294,11 +349,33 @@ function renderChart(pub) {{
       plugins: {{
         legend: {{ display: false }},
         tooltip: {{ callbacks: {{ label: ctx => {{
+          const m = ctx.dataset.label;
           const v = ctx.parsed.y;
-          if (v == null) return `${{ctx.dataset.label}}: –`;
-          if (diffMode) return `${{ctx.dataset.label}}: ${{v > 0 ? "+" : ""}}${{v.toFixed(2)}} pp`;
-          if (relativeMode) return `${{ctx.dataset.label}}: ${{v.toFixed(1)}} %`;
-          return `${{ctx.dataset.label}}: ${{v.toLocaleString("de-DE")}}`;
+          const valStr = v == null ? "–"
+            : diffMode     ? (v > 0 ? "+" : "") + v.toFixed(2) + " pp"
+            : relativeMode ? v.toFixed(1) + " %"
+            : v.toLocaleString("de-DE");
+          const lines = [`${{m}}: ${{valStr}}`];
+          if (ctx.dataIndex === YEARS.indexOf("2025") && !diffMode) {{
+            const currentPub = document.getElementById("pub-select").value;
+            // Step 1: sum all publications' 2025 clicks for this module
+            const modTotal2025 = Object.values(pub_map).reduce((s, mods) => s + ((mods[m] || [])[6] || 0), 0);
+            // Step 2: clicks of selected publication in this module in 2025
+            const pub2025Clicks = (pub_map[currentPub]?.[m] || [])[6] || 0;
+            const clickShare = modTotal2025 > 0 ? (pub2025Clicks / modTotal2025) * 100 : 0;
+            lines.push(`Klicks Modul 2025: ${{modTotal2025.toLocaleString("de-DE")}}`);
+            lines.push(`Klick-Anteil Publikation: ${{clickShare.toFixed(1)}} %`);
+            // Step 3: revenue of the module in 2025
+            const revInfo = REV[m];
+            if (revInfo && revInfo.revenue != null) {{
+              const rev = revInfo.revenue;
+              lines.push(`Umsatz Modul 2025: ${{rev.toLocaleString("de-DE", {{style:"currency", currency:"EUR", maximumFractionDigits:0}})}}`);
+              // Step 4: publication's revenue contribution
+              const pubRevContrib = (clickShare / 100) * rev;
+              lines.push(`Umsatz-Beitrag Publikation: ${{pubRevContrib.toLocaleString("de-DE", {{style:"currency", currency:"EUR", maximumFractionDigits:0}})}}`);
+            }}
+          }}
+          return lines;
         }}}}}}
       }},
       scales: {{
